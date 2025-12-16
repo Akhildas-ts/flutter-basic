@@ -1,480 +1,450 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:equatable/equatable.dart';
+import 'package:go_router/go_router.dart';
 
-// Model - Like your domain entity in Go
-class Todo extends Equatable {
-  final String id;
-  final String title;
-  final bool isCompleted;
-
-  const Todo({
-    required this.id,
-    required this.title,
-    this.isCompleted = false,
-  });
-
-  Todo copyWith({String? title, bool? isCompleted}) {
-    return Todo(
-      id: id,
-      title: title ?? this.title,
-      isCompleted: isCompleted ?? this.isCompleted,
-    );
-  }
-
-  @override
-  List<Object?> get props => [id, title, isCompleted];
+// Auth state (simplified) - Think of this as your session manager
+class Auth {
+  static bool isLoggedIn = false;
+  static String? redirectAfterLogin;
 }
 
-enum TodoFilter { all, active, completed }
+// Mock product data - Like your database records
+final mockProducts = [
+  {'id': '1', 'name': 'MacBook Pro', 'price': '\$2499'},
+  {'id': '2', 'name': 'iPhone 15', 'price': '\$999'},
+  {'id': '3', 'name': 'AirPods Pro', 'price': '\$249'},
+  {'id': '4', 'name': 'iPad Air', 'price': '\$599'},
+];
 
-// ============================================================================
-// EVENTS - Like HTTP request types (GET, POST, PUT, DELETE)
-// ============================================================================
-
-abstract class TodoEvent extends Equatable {
-  @override
-  List<Object?> get props => [];
-}
-
-class AddTodo extends TodoEvent {
-  final String title;
-
-  AddTodo(this.title);
-
-  @override
-  List<Object?> get props => [title];
-}
-
-class ToggleTodo extends TodoEvent {
-  final String id;
-
-  ToggleTodo(this.id);
-
-  @override
-  List<Object?> get props => [id];
-}
-
-class DeleteTodo extends TodoEvent {
-  final String id;
-
-  DeleteTodo(this.id);
-
-  @override
-  List<Object?> get props => [id];
-}
-
-class FilterChanged extends TodoEvent {
-  final TodoFilter filter;
-
-  FilterChanged(this.filter);
-
-  @override
-  List<Object?> get props => [filter];
-}
-
-// ============================================================================
-// STATE - Like your API response structure
-// ============================================================================
-
-class TodoState extends Equatable {
-  final List<Todo> todos;
-  final TodoFilter filter;
-  final bool isAdding;
-  final String? error;
-
-  const TodoState({
-    this.todos = const [],
-    this.filter = TodoFilter.all,
-    this.isAdding = false,
-    this.error,
-  });
-
-  // Computed property for filtered todos
-  List<Todo> get filteredTodos {
-    switch (filter) {
-      case TodoFilter.all:
-        return todos;
-      case TodoFilter.active:
-        return todos.where((t) => !t.isCompleted).toList();
-      case TodoFilter.completed:
-        return todos.where((t) => t.isCompleted).toList();
+// Router configuration - Like your HTTP router (gin, chi, etc.)
+final router = GoRouter(
+  initialLocation: '/',
+  
+  // Redirect logic - Like middleware checking auth
+  redirect: (context, state) {
+    final isLoggedIn = Auth.isLoggedIn;
+    final isOnLoginPage = state.matchedLocation == '/login';
+    
+    // If not logged in and trying to access protected routes
+    if (!isLoggedIn && !isOnLoginPage) {
+      // Save where they wanted to go
+      Auth.redirectAfterLogin = state.matchedLocation;
+      return '/login';
     }
-  }
+    
+    // If logged in and on login page, redirect home
+    if (isLoggedIn && isOnLoginPage) {
+      return '/';
+    }
+    
+    return null; // No redirect needed
+  },
+  
+  routes: [
+    // Login route (public, no shell)
+    GoRoute(
+      path: '/login',
+      builder: (context, state) => const LoginScreen(),
+    ),
+    
+    // Shell route - persistent bottom navigation
+    ShellRoute(
+      builder: (context, state, child) {
+        return MainShell(child: child);
+      },
+      routes: [
+        // Home route
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const HomeScreen(),
+        ),
+        
+        // Products routes
+        GoRoute(
+          path: '/products',
+          builder: (context, state) => const ProductListScreen(),
+          routes: [
+            // Nested: /products/:id
+            GoRoute(
+              path: ':id',
+              builder: (context, state) {
+                final productId = state.pathParameters['id']!;
+                return ProductDetailScreen(productId: productId);
+              },
+            ),
+          ],
+        ),
+        
+        // Cart route
+        GoRoute(
+          path: '/cart',
+          builder: (context, state) => const CartScreen(),
+        ),
+        
+        // Profile routes
+        GoRoute(
+          path: '/profile',
+          builder: (context, state) => const ProfileScreen(),
+          routes: [
+            // Nested: /profile/edit
+            GoRoute(
+              path: 'edit',
+              builder: (context, state) => const EditProfileScreen(),
+            ),
+          ],
+        ),
+      ],
+    ),
+  ],
+);
 
-  // Statistics
-  int get totalCount => todos.length;
-  int get completedCount => todos.where((t) => t.isCompleted).length;
-  int get activeCount => totalCount - completedCount;
-
-  TodoState copyWith({
-    List<Todo>? todos,
-    TodoFilter? filter,
-    bool? isAdding,
-    String? error,
-  }) {
-    return TodoState(
-      todos: todos ?? this.todos,
-      filter: filter ?? this.filter,
-      isAdding: isAdding ?? this.isAdding,
-      error: error,
-    );
-  }
-
-  @override
-  List<Object?> get props => [todos, filter, isAdding, error];
-}
-
-// ============================================================================
-// BLOC - Like your service layer + controller in Go
-// ============================================================================
-
-class TodoBloc extends Bloc<TodoEvent, TodoState> {
-  TodoBloc() : super(const TodoState()) {
-    // Register event handlers - like route handlers
-    on<AddTodo>(_onAddTodo);
-    on<ToggleTodo>(_onToggleTodo);
-    on<DeleteTodo>(_onDeleteTodo);
-    on<FilterChanged>(_onFilterChanged);
-  }
-
-  // Handler: Add Todo
-  Future<void> _onAddTodo(AddTodo event, Emitter<TodoState> emit) async {
-    if (event.title.trim().isEmpty) return;
-
-    // Show loading state
-    emit(state.copyWith(isAdding: true));
-
-    // Simulate API call (like time.Sleep in Go)
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    // Create new todo
-    final newTodo = Todo(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      title: event.title.trim(),
-    );
-
-    // Add to list
-    final updatedTodos = [...state.todos, newTodo];
-
-    // Emit new state
-    emit(state.copyWith(
-      todos: updatedTodos,
-      isAdding: false,
-    ));
-  }
-
-  // Handler: Toggle Todo completion
-  void _onToggleTodo(ToggleTodo event, Emitter<TodoState> emit) {
-    final updatedTodos = state.todos.map((todo) {
-      if (todo.id == event.id) {
-        return todo.copyWith(isCompleted: !todo.isCompleted);
-      }
-      return todo;
-    }).toList();
-
-    emit(state.copyWith(todos: updatedTodos));
-  }
-
-  // Handler: Delete Todo
-  void _onDeleteTodo(DeleteTodo event, Emitter<TodoState> emit) {
-    final updatedTodos = state.todos.where((t) => t.id != event.id).toList();
-    emit(state.copyWith(todos: updatedTodos));
-  }
-
-  // Handler: Change Filter
-  void _onFilterChanged(FilterChanged event, Emitter<TodoState> emit) {
-    emit(state.copyWith(filter: event.filter));
-  }
-}
-
-// ============================================================================
-// UI - Like your frontend template/view
-// ============================================================================
-
-class TodoPage extends StatelessWidget {
-  const TodoPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return BlocProvider(
-      create: (context) => TodoBloc(),
-      child: const TodoView(),
-    );
-  }
-}
-
-class TodoView extends StatefulWidget {
-  const TodoView({super.key});
-
-  @override
-  State<TodoView> createState() => _TodoViewState();
-}
-
-class _TodoViewState extends State<TodoView> {
-  final _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+// MainShell - Persistent bottom navigation (like a layout wrapper)
+class MainShell extends StatelessWidget {
+  final Widget child;
+  
+  const MainShell({super.key, required this.child});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('BLoC Todo App'),
-        backgroundColor: Colors.blue,
-      ),
-      body: Column(
-        children: [
-          // Statistics Bar
-          BlocBuilder<TodoBloc, TodoState>(
-            builder: (context, state) {
-              return Container(
-                padding: const EdgeInsets.all(16),
-                color: Colors.blue.shade50,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _StatItem(
-                      label: 'Total',
-                      count: state.totalCount,
-                      color: Colors.blue,
-                    ),
-                    _StatItem(
-                      label: 'Active',
-                      count: state.activeCount,
-                      color: Colors.orange,
-                    ),
-                    _StatItem(
-                      label: 'Completed',
-                      count: state.completedCount,
-                      color: Colors.green,
-                    ),
-                  ],
-                ),
-              );
-            },
+      body: child, // The actual page content goes here
+      bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
+        currentIndex: _calculateSelectedIndex(context),
+        onTap: (index) => _onItemTapped(index, context),
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home),
+            label: 'Home',
           ),
-
-          // Filter Chips
-          BlocBuilder<TodoBloc, TodoState>(
-            builder: (context, state) {
-              return Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _FilterChip(
-                      label: 'All',
-                      isSelected: state.filter == TodoFilter.all,
-                      onTap: () => context.read<TodoBloc>().add(
-                            FilterChanged(TodoFilter.all),
-                          ),
-                    ),
-                    const SizedBox(width: 8),
-                    _FilterChip(
-                      label: 'Active',
-                      isSelected: state.filter == TodoFilter.active,
-                      onTap: () => context.read<TodoBloc>().add(
-                            FilterChanged(TodoFilter.active),
-                          ),
-                    ),
-                    const SizedBox(width: 8),
-                    _FilterChip(
-                      label: 'Completed',
-                      isSelected: state.filter == TodoFilter.completed,
-                      onTap: () => context.read<TodoBloc>().add(
-                            FilterChanged(TodoFilter.completed),
-                          ),
-                    ),
-                  ],
-                ),
-              );
-            },
+          BottomNavigationBarItem(
+            icon: Icon(Icons.shopping_bag),
+            label: 'Products',
           ),
-
-          const Divider(height: 1),
-
-          // Add Todo Input
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    decoration: const InputDecoration(
-                      hintText: 'What needs to be done?',
-                      border: OutlineInputBorder(),
-                    ),
-                    onSubmitted: (value) => _addTodo(context),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                BlocBuilder<TodoBloc, TodoState>(
-                  builder: (context, state) {
-                    return ElevatedButton(
-                      onPressed: state.isAdding ? null : () => _addTodo(context),
-                      child: state.isAdding
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('Add'),
-                    );
-                  },
-                ),
-              ],
-            ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.shopping_cart),
+            label: 'Cart',
           ),
-
-          // Todo List
-          Expanded(
-            child: BlocBuilder<TodoBloc, TodoState>(
-              builder: (context, state) {
-                final todos = state.filteredTodos;
-
-                if (todos.isEmpty) {
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.inbox, size: 100, color: Colors.grey.shade300),
-                        const SizedBox(height: 16),
-                        Text(
-                          'No todos yet',
-                          style: TextStyle(
-                            fontSize: 18,
-                            color: Colors.grey.shade600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-
-                return ListView.builder(
-                  itemCount: todos.length,
-                  itemBuilder: (context, index) {
-                    final todo = todos[index];
-                    return _TodoItem(todo: todo);
-                  },
-                );
-              },
-            ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person),
+            label: 'Profile',
           ),
         ],
       ),
     );
   }
 
-  void _addTodo(BuildContext context) {
-    if (_controller.text.trim().isNotEmpty) {
-      context.read<TodoBloc>().add(AddTodo(_controller.text));
-      _controller.clear();
+  // Figure out which tab should be highlighted
+  int _calculateSelectedIndex(BuildContext context) {
+    final location = GoRouterState.of(context).uri.toString();
+    if (location == '/') return 0;
+    if (location.startsWith('/products')) return 1;
+    if (location.startsWith('/cart')) return 2;
+    if (location.startsWith('/profile')) return 3;
+    return 0;
+  }
+
+  // Handle tab clicks
+  void _onItemTapped(int index, BuildContext context) {
+    switch (index) {
+      case 0:
+        context.go('/');
+        break;
+      case 1:
+        context.go('/products');
+        break;
+      case 2:
+        context.go('/cart');
+        break;
+      case 3:
+        context.go('/profile');
+        break;
     }
   }
 }
 
-// ============================================================================
-// WIDGETS - Reusable components
-// ============================================================================
-
-class _StatItem extends StatelessWidget {
-  final String label;
-  final int count;
-  final Color color;
-
-  const _StatItem({
-    required this.label,
-    required this.count,
-    required this.color,
-  });
+// Home Screen
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(
-          count.toString(),
-          style: TextStyle(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-            color: color,
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Home'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () {
+              Auth.isLoggedIn = false;
+              context.go('/login');
+            },
           ),
-        ),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 14,
-            color: Colors.grey.shade700,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _FilterChip extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _FilterChip({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Chip(
-        label: Text(label),
-        backgroundColor: isSelected ? Colors.blue : Colors.grey.shade200,
-        labelStyle: TextStyle(
-          color: isSelected ? Colors.white : Colors.black,
-          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+        ],
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              'Welcome to the Store!',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () => context.go('/products'),
+              child: const Text('Browse Products'),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _TodoItem extends StatelessWidget {
-  final Todo todo;
-
-  const _TodoItem({required this.todo});
+// Product List Screen
+class ProductListScreen extends StatelessWidget {
+  const ProductListScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      leading: Checkbox(
-        value: todo.isCompleted,
-        onChanged: (_) {
-          context.read<TodoBloc>().add(ToggleTodo(todo.id));
-        },
-      ),
-      title: Text(
-        todo.title,
-        style: TextStyle(
-          decoration: todo.isCompleted ? TextDecoration.lineThrough : null,
-          color: todo.isCompleted ? Colors.grey : Colors.black,
-        ),
-      ),
-      trailing: IconButton(
-        icon: const Icon(Icons.delete, color: Colors.red),
-        onPressed: () {
-          context.read<TodoBloc>().add(DeleteTodo(todo.id));
+    return Scaffold(
+      appBar: AppBar(title: const Text('Products')),
+      body: ListView.builder(
+        itemCount: mockProducts.length,
+        itemBuilder: (context, index) {
+          final product = mockProducts[index];
+          return ListTile(
+            leading: const Icon(Icons.shopping_bag, size: 40),
+            title: Text(product['name']!),
+            subtitle: Text(product['price']!),
+            trailing: const Icon(Icons.arrow_forward_ios),
+            onTap: () {
+              // Navigate to product detail: /products/:id
+              context.go('/products/${product['id']}');
+            },
+          );
         },
       ),
     );
   }
 }
 
-void main() => runApp(const MaterialApp(home: TodoPage()));
+// Product Detail Screen
+class ProductDetailScreen extends StatelessWidget {
+  final String productId;
+  
+  const ProductDetailScreen({super.key, required this.productId});
+
+  @override
+  Widget build(BuildContext context) {
+    // Find product by ID
+    final product = mockProducts.firstWhere(
+      (p) => p['id'] == productId,
+      orElse: () => {'id': productId, 'name': 'Unknown', 'price': '\$0'},
+    );
+    
+    return Scaffold(
+      appBar: AppBar(title: Text(product['name']!)),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.shopping_bag, size: 100, color: Colors.blue),
+            const SizedBox(height: 20),
+            Text(
+              product['name']!,
+              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              product['price']!,
+              style: const TextStyle(fontSize: 24, color: Colors.green),
+            ),
+            const SizedBox(height: 20),
+            Text('Product ID: $productId'),
+            const SizedBox(height: 30),
+            ElevatedButton(
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Added ${product['name']} to cart')),
+                );
+              },
+              child: const Text('Add to Cart'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Cart Screen
+class CartScreen extends StatelessWidget {
+  const CartScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Shopping Cart')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.shopping_cart, size: 100, color: Colors.grey),
+            const SizedBox(height: 20),
+            const Text(
+              'Your cart is empty',
+              style: TextStyle(fontSize: 20),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () => context.go('/products'),
+              child: const Text('Start Shopping'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Profile Screen
+class ProfileScreen extends StatelessWidget {
+  const ProfileScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Profile')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircleAvatar(
+              radius: 50,
+              child: Icon(Icons.person, size: 50),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'John Doe',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            const Text('john.doe@example.com'),
+            const SizedBox(height: 30),
+            ElevatedButton(
+              onPressed: () => context.go('/profile/edit'),
+              child: const Text('Edit Profile'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Edit Profile Screen
+class EditProfileScreen extends StatelessWidget {
+  const EditProfileScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Edit Profile')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            const TextField(
+              decoration: InputDecoration(
+                labelText: 'Name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const TextField(
+              decoration: InputDecoration(
+                labelText: 'Email',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 30),
+            ElevatedButton(
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Profile updated!')),
+                );
+                context.go('/profile');
+              },
+              child: const Text('Save Changes'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Login Screen
+class LoginScreen extends StatelessWidget {
+  const LoginScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Login')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.lock, size: 100, color: Colors.blue),
+              const SizedBox(height: 30),
+              const Text(
+                'Please login to continue',
+                style: TextStyle(fontSize: 20),
+              ),
+              const SizedBox(height: 30),
+              const TextField(
+                decoration: InputDecoration(
+                  labelText: 'Username',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const TextField(
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 30),
+              ElevatedButton(
+                onPressed: () {
+                  // Set logged in
+                  Auth.isLoggedIn = true;
+                  
+                  // Redirect to saved location or home
+                  final redirect = Auth.redirectAfterLogin ?? '/';
+                  Auth.redirectAfterLogin = null;
+                  context.go(redirect);
+                },
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 40, vertical: 12),
+                  child: Text('Login', style: TextStyle(fontSize: 18)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+void main() {
+  runApp(MaterialApp.router(routerConfig: router));
+}
